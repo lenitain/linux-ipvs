@@ -1,0 +1,25 @@
+[package]
+name = "linux-ipvs"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Complete mechanism layer for Linux IPVS via netlink: virtual service and destination management with typed statistics."
+readme = "README.md"
+repository = "https://github.com/lenitain/linux-ipvs"
+keywords = ["ipvs", "netlink", "linux", "load-balancing"]
+categories = ["os::linux-apis", "network-programming"]
+authors = ["lenitain <xt.zhu@qq.com>"]
+
+include = [
+    "Cargo.toml",
+    "LICENSE",
+    "README.md",
+    "DESIGN.md",
+    "src/",
+]
+
+[lib]
+name = "linux_ipvs"
+path = "src/lib.rs"
+
+[dependencies]
