@@ -2,24 +2,41 @@
 name = "linux-ipvs"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 license = "MIT"
 description = "Complete mechanism layer for Linux IPVS via netlink: virtual service and destination management with typed statistics."
 readme = "README.md"
 repository = "https://github.com/lenitain/linux-ipvs"
+documentation = "https://docs.rs/linux-ipvs"
 keywords = ["ipvs", "netlink", "linux", "load-balancing"]
 categories = ["os::linux-apis", "network-programming"]
-authors = ["lenitain <xt.zhu@qq.com>"]
+authors = ["linux-ipvs contributors"]
 
 include = [
     "Cargo.toml",
     "LICENSE",
     "README.md",
-    "DESIGN.md",
+    "CHANGELOG.md",
     "src/",
+    "tests/",
+    "examples/",
 ]
+
+[features]
+default = ["std"]
+# The `std` feature enables the optional `libc` dependency and the real
+# `NETLINK_GENERIC` socket. With `--no-default-features` the crate builds
+# with zero dependencies; the message layer, the IPVS codec and the
+# transport-injection API remain available.
+std = ["dep:libc"]
+
+[dependencies]
+libc = { version = "0.2", optional = true }
 
 [lib]
 name = "linux_ipvs"
 path = "src/lib.rs"
 
-[dependencies]
+[[example]]
+name = "list_services"
+required-features = ["std"]

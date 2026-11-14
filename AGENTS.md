@@ -14,7 +14,7 @@
 4. **集成测试**——happy path + **每个错误变体** + 容错；dump 多段拼接；extack 解析；空 dump。
 5. **doc test 全覆盖**——每个公开 API 有可运行 doctest（合成字节/注入传输）；真实系统用法用 `no_run` doctest + 可选 example。
 6. **质量门全绿**——见第 5 节命令；特性矩阵（默认 + `--no-default-features`）都要绿。
-7. **仓库卫生**——见第 4 节清单与"当前仓库待修项"。
+7. **仓库卫生**——见第 4 节清单与"当前仓库状态"。
 8. **一次干净提交**——/tmp 开发全绿后，一次性写入正式目录并 commit；后续修改用 `--amend` 合并。
 9. **对照 DESIGN.md 清单 A–E 最终审计**——逐项给出证据，不是"看起来没问题"。
 
@@ -26,7 +26,7 @@
 
 ### 3.2 解析器的细节坑（apparmor-policy 反复踩，全是真实 bug）
 - **对齐/填充**：nla 长度必须 `NLA_ALIGN`（4 字节）；嵌套属性必须带 `NLA_F_NESTED`；解析时校验 `nla_len>=4` 且不越界——最容易踩。
-- **字节序**：`ADDR`/`PORT`/`STATS64` 是网络字节序，标量是主机序——类型化封装后用户不碰，但编解码内部必须分清。
+- **字节序**：`ADDR`/`PORT`/`TUN_PORT` 是网络序；`STATS`/`STATS64` 全部主机序（`nla_put_u64_64bit`）；`NETMASK` IPv4 是 be32 掩码、IPv6 是主机序前缀长度（1..=128）。类型化封装后用户不碰，但编解码内部必须分清。
 - **多部分消息**：dump 的 `NLM_F_MULTI` + `NLMSG_DONE` 结束；seq 匹配校验——漏掉 `NLMSG_DONE` 会挂起，漏掉 seq 校验会串消息。
 - **终止符号双重消费**：属性解析时 `nla_len` 与整体 `nlmsg_len` 都要管——内层循环消费后外层不能再越界。
 - **补丁应用必须验证**：改代码后立即构建验证。
@@ -49,7 +49,7 @@
 2. **家族解析**：先 `CTRL_CMD_GETFAMILY`（nlmsg_type=0x10，带 `CTRL_ATTR_FAMILY_NAME="IPVS"`）取家族 id，缓存进 `Ipvs`。解析失败（家族不存在）→ `Error::FamilyNotFound`（内核未编译 IPVS）。`new_with_sock` 让测试注入。
 3. **传输可注入（不回避内核交互）**：socket 创建/send/recv 抽成可注入边界。消息构建/解析全纯测，**成功路径与错误路径都在本机测**，只留最终 syscall 命中给真机。真实用法给 `no_run` doctest + example。
 4. **dump 多段处理**：`NLM_F_MULTI` 多段回复直到 `NLMSG_DONE`；每段独立解析，失败降级保留原文，不因单段坏掉整个 dump；空 dump 返回空 Vec。
-5. **字节序类型化**：`Ipv4Addr`/`Ipv6Addr`/`u16` 端口，编解码内部做网络序转换；`STATS64` 是 u64 网络序。
+5. **字节序类型化**：`Ipv4Addr`/`Ipv6Addr`/`u16` 端口，编解码内部做网络序转换；`STATS`/`STATS64` 是主机序；`NETMASK` 按地址族有掩码/前缀两种语义（`Netmask` 枚举）。
 
 ### 4.2 无 root 验证受限 → 测试策略（本机实测）
 - 本机无 `/proc/net/ip_vs`（IPVS 未加载）、无 root、无 sudo、无 CAP_NET_ADMIN。**任何测试都不要依赖真实 IPVS 内核交互**。
@@ -63,13 +63,12 @@
 - **逃生舱**：`as_fd`、`send_raw`/`recv_raw`（原始 netlink 消息）。
 - **别做过头**：不要在 `add_service` 里自动带统计请求；不要在 drop 里隐式 del；不要替用户决定 dump 还是单查。
 
-### 4.4 当前仓库待修项（实现时必须一并修完）
-- README.md 引用了 DESIGN.md 且没有四个徽章 → 重写为"总览 + 一个主示例 + 四个徽章"。
-- Cargo.toml 的 `include` 含 `DESIGN.md` → 移除；补 `documentation` 字段。
-- LICENSE 版权行是 `Copyright (c) 2026 lenitain` → 改为 `Copyright (c) 2026 linux-ipvs contributors`。
-- 缺 CHANGELOG.md、缺 `.github/workflows/ci.yml` → 新建。
-- 当前 0 个 commit、全部文件 untracked → 实现完一次性提交。
-- src/lib.rs 是占位骨架 → 按 DESIGN.md 模块划分重写。
+### 4.4 当前仓库状态（0.1.0 已完成 · 2026-11-14）
+- 实现已完成并一次性提交：`nl` / `ipvs` / `service` / `dest` / `stats` / `daemon` / `timeout` / `error` / `proto`，约 4000 行含测试。
+- 测试：`tests/protocol.rs`（11 个请求形状测试）+ `tests/control.rs`（25 个行为测试）+ `nl` 内联单测 + 全部公开 API 的 doctest；注入传输在 `tests/common/mod.rs`。
+- 仓库卫生已就绪：README（四徽章、无 DESIGN 引用）、CHANGELOG、CI（test/fmt/clippy/doc，双特性）、LICENSE contributors、`Cargo.lock` 不提交、`include` 不含 DESIGN.md。
+- **后续修改请保持 DESIGN.md 的“实现结论”与源码一致**；内核事实以 F1–F6 与“实现结论”中的三处纠正为准（回复 `ADDR` 恒 16 字节；`STATS64` 主机序；`NETMASK` 双语义）。
+- 尚未在真机验证：本机无 IPVS/CAP_NET_ADMIN；`examples/list_services.rs` 留给有权限环境。
 
 ## 5. 仓库卫生清单（提交前逐项勾）
 
@@ -105,4 +104,4 @@
 - 解析阶段不展开、不吞信息：属性完整映射到类型化结果；原始消息可回溯。
 - 用往返不变量作为核心不变量：消息层构造→字节→解析==原值；dump 拼接大范围测试。
 - 零依赖可用：`default-features = false` 必须能构建（核心只用 `libc` + `std`）。
-- **本领域特有**：nla 对齐/嵌套/字节序（ADDR/PORT/STATS64 网络序）；dump 的 `NLM_F_MULTI`+`NLMSG_DONE`+seq 匹配；extack（`NETLINK_EXT_ACK`+`NLMSGERR_ATTR_MSG`）透传；家族解析失败=内核未编译 IPVS；内核交互不回避——传输注入让成功/错误都能测。
+- **本领域特有**：nla 对齐/嵌套/字节序（ADDR/PORT/TUN_PORT 网络序，STATS 主机序）；dump 的 `NLM_F_MULTI`+`NLMSG_DONE`+seq 匹配；extack（`NETLINK_EXT_ACK`+`NLMSGERR_ATTR_MSG`）透传；家族解析失败=内核未编译 IPVS；内核交互不回避——传输注入让成功/错误都能测。

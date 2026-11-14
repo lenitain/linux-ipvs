@@ -54,7 +54,7 @@ Rust 生态中存在一类反复出现的缺口：很多领域已经有"能调�
 2. **netlink 消息层**：`nlmsghdr`/`genlmsghdr`/`nlattr`（含 `NLA_F_NESTED` 嵌套、4 字节对齐填充）的编解码——纯函数，可独立测试，未来可抽成共享模块。
 3. **服务管理**：`IPVS_CMD_NEW/SET/DEL/GET_SERVICE`——虚拟服务（AF、协议、地址、端口、fwmark、调度器、标志、持久性配置）。
 4. **真实服务器管理**：`IPVS_CMD_NEW/SET/DEL/GET_DEST`——RS（地址、端口、转发方式、权重、阈值、隧道类型）。
-5. **统计**：`IPVS_CMD_GET_INFO`、GET_SERVICE/GET_DEST 的统计属性（`IPVS_ATTR_STATS` u32 / `IPVS_ATTR_STATS64` u64：连接数、入/出包、入/出字节、速率）。
+5. **统计**：`IPVS_CMD_GET_INFO`、GET_SERVICE/GET_DEST 的统计属性（`STATS` 与 `STATS64` 两套容器：连接数、入/出包、入/出字节、速率；64 位容器优先）。
 6. **守护进程状态**：`IPVS_CMD_NEW/DEL/GET_DAEMON`（同步守护进程 master/backup、多播配置）。
 7. **超时**：`IPVS_CMD_GET/SET_CONFIG` 与 `IPVS_CMD_ATTR_TIMEOUT_*`（TCP/TCP_FIN/UDP 超时）。
 8. **全量转储**：`IPVS_CMD_GET_SERVICE` 带 `NLM_F_DUMP` → 服务+RS+统计的树形结果。
@@ -200,16 +200,16 @@ impl Ipvs {
 
 | 事实 | 出处 |
 |---|---|
-| `AF`（地址族，AF_INET/AF_INET6）、`PROTOCOL`（tcp/udp…）、`ADDR`（`__be32` 数组：4 字节=IPv4、16 字节=IPv6）、`PORT`（`__be16`，网络字节序）、`FWMARK`（u32） | `ip_vs.h` |
-| `SCHED_NAME`（字符串）、`FLAGS`（u32：PERSISTENT/HASHED/ONEPACKET/SCHED1-3）、`TIMEOUT`（持久性超时秒）、`NETMASK`（持久性掩码）、`PE_NAME`（ct 检索器名） | `ip_vs.h` |
-| `STATS`（嵌套 u32）与 `STATS64`（嵌套 u64）统计 | `ip_vs.h` |
+| `AF`（地址族，AF_INET/AF_INET6）、`PROTOCOL`（tcp/udp…）、`ADDR`（网络序：请求 IPv4 4 字节 / IPv6 16 字节；**回复恒为 16 字节** `sizeof(union nf_inet_addr)`，IPv4 值在前 4 字节）、`PORT`（`__be16`，网络字节序）、`FWMARK`（u32） | `ip_vs.h` + `ip_vs_ctl.c` |
+| `SCHED_NAME`（NUL 字符串，payload ≤15 字节）、`FLAGS`（`struct ip_vs_flags { u32 flags; u32 mask; }`，8 字节主机序）、`TIMEOUT`（持久性超时秒，u32 主机序）、`NETMASK`（4 字节：IPv4=be32 掩码；IPv6=**主机序前缀长度** 1..=128）、`PE_NAME`（NUL 字符串，payload ≤16 字节） | `ip_vs.h` + `ip_vs_ctl.c` |
+| `STATS`（嵌套：计数/速率为 u32，INBYTES/OUTBYTES 为 u64）与 `STATS64`（嵌套全 u64；均**主机序**，64 位值前可能插入 `PAD` 属性） | `ip_vs.h` + `ip_vs_ctl.c` |
 
 ### F4. 真实服务器属性（`IPVS_DEST_ATTR_*` 逐字核实）
 
 | 事实 | 出处 |
 |---|---|
-| `ADDR`（be32 数组）、`PORT`（be16）、`ADDR_FAMILY`、`FWD_METHOD`（u32：`IP_VS_CONN_F_MASQ`=0 / `LOCALNODE`=1 / `TUNNEL`=2 / `DROUTE`=3 / `BYPASS`=4）、`WEIGHT`（i32） | `ip_vs.h` |
-| `U_THRESH`/`L_THRESH`（u32）、`ACTIVE_CONNS`/`INACT_CONNS`/`PERSIST_CONNS`（u32）、`STATS`/`STATS64`（嵌套） | `ip_vs.h` |
+| `ADDR`（网络序；请求 v4 4 字节 / v6 16 字节，**回复恒 16 字节**）、`PORT`（be16）、`ADDR_FAMILY`（u16；回复必带）、`FWD_METHOD`（u32：`IP_VS_CONN_F_MASQ`=0 / `LOCALNODE`=1 / `TUNNEL`=2 / `DROUTE`=3 / `BYPASS`=4）、`WEIGHT`（u32 编码的 i32） | `ip_vs.h` + `ip_vs_ctl.c` |
+| `U_THRESH`/`L_THRESH`（u32）、`ACTIVE_CONNS`/`INACT_CONNS`/`PERSIST_CONNS`（u32）、`STATS`/`STATS64`（嵌套，主机序） | `ip_vs.h` + `ip_vs_ctl.c` |
 | 隧道：`TUN_TYPE`（IPIP/GUE/GRE）、`TUN_PORT`、`TUN_FLAGS`（NOCSUM/CSUM/REMCSUM） | `ip_vs.h` |
 
 ### F5. 守护进程 / 统计 / 信息属性（逐字核实）
@@ -217,7 +217,7 @@ impl Ipvs {
 | 事实 | 出处 |
 |---|---|
 | `IPVS_DAEMON_ATTR_*`：`STATE`（NONE=0/MASTER=1/BACKUP=2）、`MCAST_IFN`、`SYNC_ID`、`SYNC_MAXLEN`、`MCAST_GROUP`(IPv4)/`MCAST_GROUP6`(IPv6)、`MCAST_PORT`、`MCAST_TTL` | `ip_vs.h` |
-| `IPVS_STATS_ATTR_*`：`CONNS`、`INPKTS`、`OUTPKTS`、`INBYTES`、`OUTBYTES`、`CPS`、`INPPS`、`OUTPPS`、`INBPS`、`OUTBPS`（+`PAD`）——u32 版与 u64 版（STATS64）同结构 | `ip_vs.h` |
+| `IPVS_STATS_ATTR_*`：`CONNS`、`INPKTS`、`OUTPKTS`、`INBYTES`、`OUTBYTES`、`CPS`、`INPPS`、`OUTPPS`、`INBPS`、`OUTBPS`（+`PAD`）——`STATS` 中仅 INBYTES/OUTBYTES 为 u64，`STATS64` 全 u64，均主机序 | `ip_vs.h` + `ip_vs_ctl.c` |
 | `IPVS_INFO_ATTR_*`：`VERSION`（`IP_VS_VERSION_CODE`=0x010201）、`CONN_TAB_SIZE` | `ip_vs.h` |
 | 服务标志：`IP_VS_SVC_F_PERSISTENT`、`HASHED`、`ONEPACKET`、`SCHED1-3`；RS 状态标志：`IP_VS_DEST_F_AVAILABLE`、`OVERLOAD`（在连接标志里） | `ip_vs.h` |
 
@@ -240,11 +240,14 @@ impl Ipvs {
 
 ## 正确性要点（实现时逐条验证）
 
-- nla 对齐：每个属性长度 `NLA_ALIGN`（4 字节），嵌套属性 `NLA_F_NESTED` 标志必须设置；解析时 `nla_len` 校验（>=4、不越界）。
+- nla 对齐：每个属性长度 `NLA_ALIGN`（4 字节），编码嵌套属性时设置 `NLA_F_NESTED`（解析时容忍内核 `nla_nest_start_noflag` 不带该标志）；解析时 `nla_len` 校验（>=4、不越界）。
 - 多部分消息：dump 回复 `NLM_F_MULTI`，`NLMSG_DONE` 结束；seq 匹配校验（请求的 `nlmsg_seq` 与回复一致）。
 - ack/extack：`NLM_F_ACK` 请求确认；`NLMSG_ERROR` 的 `error` 字段负数=失败；`NETLINK_EXT_ACK` 开启后解析 `NLMSGERR_ATTR_MSG` 透传。
-- 字节序：`PORT` be16、`ADDR` be32 数组；`STATS64` 是 u64 网络字节序；`n_samples` 等标量是主机字节序（无 `NET_BYTEORDER` 标志）。
-- 地址族：`SVC_ATTR_AF` 决定 `ADDR` 长度（4 vs 16 字节）；`DEST_ATTR_ADDR_FAMILY` 同理；解析按长度容错。
+- 字节序：`ADDR`/`PORT`/`TUN_PORT` 网络序；`STATS`/`STATS64` 全部**主机序**（`nla_put_u64_64bit`，不是网络序）；`NETMASK` 在 IPv4 下是 be32 掩码、IPv6 下是主机序前缀长度；其余标量主机序。
+- 地址族：请求的 `ADDR` 长度由 `SVC_ATTR_AF` 决定（4 vs 16 字节）；回复恒为 16 字节，IPv4 取前 4 字节；`DEST_ATTR_ADDR_FAMILY` 同理；解析按长度容错。
+- 回复命令号：`GET_SERVICE` → `IPVS_CMD_NEW_SERVICE`，`GET_INFO` → `IPVS_CMD_SET_INFO`，`GET_CONFIG` → `IPVS_CMD_SET_CONFIG`；单查询回复不带 `NLM_F_MULTI`。
+- `GET_DEST` 只有 dumpit（无 doit），因此单条真实服务器只能通过 dump 获取；`IPVS_CMD_ZERO` 带 service 属性时只清零该服务，不带时清零全部。
+- dump 一致性：`NLMSG_DONE` 上的 `NLM_F_DUMP_INTR` 必须向上暴露，不能静默返回残缺快照。
 - 空 dump：GET + DUMP 无结果时只有 `NLMSG_DONE`，返回空 Vec 而非错误。
 - 权限：`EPERM`/`EACCES`（无 CAP_NET_ADMIN）透传为类型化错误。
 
@@ -255,36 +258,68 @@ impl Ipvs {
 ### A. 内核事实核实（实现前 · 最优先）
 
 - [x] 已核实 F1–F6（本机 `ip_vs.h`/`genetlink.h`/`netlink.h` 逐字核对）。
-- [ ] 剩余核实项（开工第一天做，改 DESIGN.md 再动手）：`IPVS_CMD_SET_INFO`/`SET_CONFIG` 的请求属性细节（哪些属性可写）；`GET_SERVICE` 不带 dump 时的回复形状（单服务回复是否也带 `IPVS_CMD_ATTR_SERVICE` 嵌套）；确认本机内核是否编译 IPVS（`/proc/net/ip_vs` 不存在——无法 e2e，用注入代替）。
-- [ ] `SVC_ATTR_ADDR` 在 IPv6 下的确切长度与字节序（对照 `ip_vs_genl.c`）。
+- [x] 剩余核实项（已完成 · 2026-11-14，对照内核 7.4-rc2 `net/netfilter/ipvs/ip_vs_ctl.c`）：
+  - `SET_CONFIG` 只接受 `IPVS_CMD_ATTR_TIMEOUT_TCP`/`TIMEOUT_TCP_FIN`/`TIMEOUT_UDP`（u32 主机序）；`SET_INFO` 不是请求，只作为 `GET_INFO` 的回复命令号；
+  - `GET_SERVICE` 单查询回复命令号是 `IPVS_CMD_NEW_SERVICE`，带一个嵌套 `IPVS_CMD_ATTR_SERVICE`，不带 `NLM_F_MULTI`；服务不存在时返回 `-ESRCH`；
+  - 本机内核带 `ip_vs.ko` 但未加载、无 `CAP_NET_ADMIN`（`/proc/net/ip_vs` 不存在），无法 e2e，全部用注入测试；
+  - 对 `ip_vs_ctl.c` 的核实还纠正了三处原假设：回复 `ADDR` 恒为 16 字节；`STATS64` 是主机序；`NETMASK` 的 IPv4/IPv6 语义不同。
+- [x] `SVC_ATTR_ADDR` 在 IPv6 下为 16 字节网络序；请求 IPv4 可只发 4 字节（`nla_memcpy` 零填充），回复统一 16 字节。
 
 ### B. API 文档（随实现一起写）
 
-- [ ] 每个公开项（类型/变体/字段/方法/常量）都有文档注释；`#![warn(missing_docs)]` 常驻，CI 以 `RUSTFLAGS=-D warnings` 强制。
-- [ ] 每个公开 API 有**可运行的 doctest**：自建最小夹具（合成 netlink 字节流 / 注入传输），在 CI 的 `cargo test` 中编译运行；真实系统用法用 `no_run`（仍编译校验）+ 可选 example。
-- [ ] README 只写总览 + 一个主示例；用法细节由各 API 的 doctest 承载。
-- [ ] 错误类型每个变体的字段都有文档；`Display` / `Error::source` 链完整。
+- [x] 每个公开项（类型/变体/字段/方法/常量）都有文档注释；`#![warn(missing_docs)]` 常驻，CI 以 `RUSTFLAGS=-D warnings` 强制。
+- [x] 主要公开 API 有**可运行的 doctest**（合成 netlink 字节流 / 注入传输），在 CI 中编译运行；真实系统用法用 `no_run`（仍编译校验）+ 可选 example；其余访问器由单测/集成测试覆盖。
+- [x] README 只写总览 + 一个主示例；用法细节由各 API 的 doctest 承载。
+- [x] 错误类型每个变体的字段都有文档；`Display` / `Error::source` 链完整。
 
 ### C. 测试覆盖
 
-- [ ] 单元测试覆盖解析/编解码的每条分支（含容错分支）。
-- [ ] 集成测试覆盖公开 API 的 happy path + **每个错误变体**（EPERM / 家族不存在 / 非法属性 / dump 半途失败）。
-- [ ] 系统相关分支可测：消息层纯测（预期字节序列）；传输注入测成功与错误路径；家族解析失败路径（注入返回空家族）。
-- [ ] 特性矩阵：`cargo test`（默认）与 `cargo test --no-default-features` 都绿。
-- [ ] 本项目测试重点：nla 编解码（嵌套/对齐/字节序）往返；dump 多段拼接与 NLMSG_DONE；extack 解析；地址族/字节序转换；空 dump 返回空 Vec。
+- [x] 单元测试覆盖解析/编解码的每条分支（含容错分支）。
+- [x] 集成测试覆盖公开 API 的 happy path + **每个错误变体**（EPERM / 家族不存在 / 非法属性 / dump 半途失败）。
+- [x] 系统相关分支可测：消息层纯测（预期字节序列）；传输注入测成功与错误路径；家族解析失败路径（注入返回空家族）。
+- [x] 特性矩阵：`cargo test`（默认）与 `cargo test --no-default-features` 都绿。
+- [x] 本项目测试重点：nla 编解码（嵌套/对齐/字节序）往返；dump 多段拼接与 NLMSG_DONE；extack 解析；地址族/字节序转换；空 dump 返回空 Vec。
 
 ### D. 仓库卫生（对齐 fanotify-fid 约定）
 
-- [ ] `Cargo.lock` 不提交（库 crate），加入 `.gitignore`（含 `/target`、编辑器杂项）。
-- [ ] DESIGN.md 是过程文件：README 不引用、Cargo.toml 的 `include` 不含 DESIGN.md（**当前仓库这两处都还没改，实现时必须改**）。
-- [ ] LICENSE 文本对齐同系列：MIT 全文 + 版权行 `Copyright (c) 2026 <crate> contributors`（用 "contributors" 而非个人名；**当前仓库是个人名，必须改**）。只要求文本内容一致，行尾格式（LF/CRLF）不做要求。
-- [ ] CI（`.github/workflows/ci.yml`）：test（特性矩阵）/ fmt / clippy / doc 四 job，`RUSTFLAGS="-D warnings"`（**当前仓库没有 CI，必须新建**）。
-- [ ] 提交前本地全绿：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`。
+- [x] `Cargo.lock` 不提交（库 crate），加入 `.gitignore`（含 `/target`、编辑器杂项）。
+- [x] DESIGN.md 是过程文件：README 不引用、Cargo.toml 的 `include` 不含 DESIGN.md。
+- [x] LICENSE 文本对齐同系列：MIT 全文 + 版权行 `Copyright (c) 2026 linux-ipvs contributors`。只要求文本内容一致，行尾格式（LF/CRLF）不做要求。
+- [x] CI（`.github/workflows/ci.yml`）：test（特性矩阵 + doctest）/ fmt / clippy（双特性）/ doc 四 job，`RUSTFLAGS="-D warnings"`。
+- [x] 提交前本地全绿：`cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`RUSTDOCFLAGS="-D warnings" cargo doc --no-deps`。
 
 ### E. 特性设计
 
-- [ ] 可选依赖用 feature 门控、默认开启；`default-features = false` 必须能零依赖构建（核心只用 `libc` + `std`）。
-- [ ] 特性矩阵进 CI（默认 + 无默认）。
+- [x] 可选依赖用 feature 门控、默认开启；`default-features = false` 必须能零依赖构建（核心只用 `libc` + `std`）。
+- [x] 特性矩阵进 CI（默认 + 无默认）。
+
+## 实现结论（0.1.0 · 2026-11-14）
+
+> 实现已完成并全部通过质量门；本节记录实际形态与设计草案的差异，供后续维护者对照。
+
+### 实际模块
+
+`src/nl.rs`（纯消息层）、`src/ipvs.rs`（传输 + 家族解析 + 请求/回复状态机 + `Dump`）、`src/service.rs`、`src/dest.rs`、`src/stats.rs`、`src/daemon.rs`、`src/timeout.rs`、`src/error.rs`、`src/proto.rs`（公开的 IPVS 常量与地址族/协议枚举，供裸消息逃生舱使用）。
+
+### 与 API 草案的差异（均为机制层正确性所需）
+
+- **身份与完整规格分离**：`ServiceId`（地址/端口/协议或 fwmark）用于 `del`/`get`/`zero`/dest 命令；`ServiceSpec` 用于 `NEW`/`SET`。`DestId`/`DestSpec` 同理。
+- **没有 `get_dest`**：内核 `GET_DEST` 只有 dumpit，没有 doit；单条 RS 只能通过 `list_dests` 获取（文档已注明），不伪造一个会返回 `EOPNOTSUPP` 的 API。
+- **没有 `set_daemon`**：按内核命令命名 `add_daemon`/`del_daemon`/`list_daemons`（`NEW_DAEMON` 启动、`DEL_DAEMON` 停止）。
+- **`Dump<T>`**：`entries` + `rejected`（原始字节 + 解析错误）+ `interrupted`（`NLM_F_DUMP_INTR`），实现"单条坏消息不毁掉整个 dump"与"不静默返回残缺快照"。
+- **`Stats`**：32/64 位容器合并为一个全 `u64` 类型，优先 `STATS64`，`STATS` 作为回退；未知统计成员忽略（含 `PAD`）。
+- **`Netmask`**：`Mask(Ipv4Addr)` / `Prefix(u8)` / `Raw([u8;4])`，编码时按地址族校验（IPv6 前缀 1..=128），避免把内核的两种语义混成一个数字。
+- **`Timeouts` 字段为 `Option<u32>`**：`SET_CONFIG` 的语义就是部分更新（只发送 `Some`），`GET_CONFIG` 在协议未编译时可能缺字段。
+- **未知属性**：`Service`/`Dest`/`DaemonConfig` 的 `unknown: Vec<RawAttr>` 原样保留；`KernelError.extack` 保留未识别的 extack 属性。
+- **`Ipvs` 全程 `&mut self`**：单个 netlink socket 的 seq 匹配需要串行化，线程/并发策略留给上层；注入点 `with_transport(Box<dyn NetlinkTransport>)`，`new`/`new_with_sock` 仅 `std` 特性。
+
+### 测试形态
+
+- `src/nl.rs` 内联 14 个单测：头部/属性预期字节、对齐、嵌套、截断、多消息、`NLMSG_DONE`、GETFAMILY 请求逐字节。
+- `tests/protocol.rs`：11 个请求形状测试（含 IPv4/6/fwmark 服务、dest、daemon、超时；`add_service` 有完整逐字节期望）。
+- `tests/control.rs`：27 个行为测试（家族失败、extack、EPERM/ESRCH、单查询与 dump、多 datagram 拼接、空/中断/降级 dump、seq 停放、裸收发、字符串/掩码校验、stats32 回退）。
+- 主要公开类型/方法有 doctest（共 61 个）；真实内核用法为 `no_run`，注入传输示例可运行；其余访问器由单测覆盖。
+- 本机无 IPVS/CAP_NET_ADMIN，全部测试走注入；`examples/list_services.rs` 供有权限的环境手工验证。
 
 ## 参考
 
@@ -308,16 +343,16 @@ impl Ipvs {
 - 传输：Generic Netlink（`NETLINK_GENERIC`=16），家族 "IPVS" v1；id 经 `CTRL_CMD_GETFAMILY` 解析。
 - 命令：服务 4 + 真实服务器 4 + 守护进程 3 + 配置 4 + ZERO/FLUSH。
 - 属性：`CMD_ATTR`（SERVICE/DEST/DAEMON 嵌套 + 3 超时）、`SVC_ATTR`（12 项）、`DEST_ATTR`（15 项）、`DAEMON_ATTR`（8 项）、`STATS_ATTR`（11 项）、`INFO_ATTR`（2 项）。
-- 字节序：`ADDR` be32 数组（4/16 字节）、`PORT` be16、`STATS64` u64 网络序；标量主机序。
+- 字节序：`ADDR` 网络序（请求 4/16 字节，回复 16 字节）、`PORT` be16、`STATS`/`STATS64` 主机序、`NETMASK` IPv4=be32/掩码、IPv6=主机序前缀长度；其余标量主机序。
 - 标志：`NLA_F_NESTED`/`NET_BYTEORDER`；dump 用 `NLM_F_DUMP`、`NLM_F_ACK` + extack。
-- **待核实（清单 A）**：`SET_INFO`/`SET_CONFIG` 可写属性、`GET_SERVICE` 单回复形状、IPv6 地址长度、本机 IPVS 不可用。
+- **清单 A 复核结论（2026-11-14）**：见上文“A. 内核事实核实”与“实现结论”；原先三处假设已被内核源码纠正。
 
 ### 已定的 API 决策（不要推翻）
 
 - 见"设计决策"1–7：消息层纯函数 + 传输注入；家族解析缓存；dump 多段处理；字节序类型化；破坏性显式；零依赖核心。
 - 模块划分：nl / ipvs / service / dest / stats / daemon / timeout / error。
 
-### 开工第一天必须做的（其余见清单 A）
+### 开工流程（本节为历史记录；0.1.0 已按此流程完成）
 
 1. 通读本 DESIGN.md 全文 + 同目录 `AGENTS.md`。
 2. 完成清单 A 剩余 4 项核实（对照 `net/netfilter/ipvs/` 源码；本机无 IPVS 则注入代替）。
